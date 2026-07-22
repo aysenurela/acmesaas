@@ -35,7 +35,7 @@ const PLANS = {
   },
 }
 
-// Maps planId → SKU and response limits.
+// Maps planId -> SKU and response limits.
 // Note: 'starter' is API-only (free plan) and intentionally not shown on /features.
 const PRODUCTS = [
   { sku: 'starter',            planId: 'starter',    responsesPerYear: 5000   },
@@ -184,7 +184,7 @@ function handleRecommendPlan(req, res) {
     ? `${plan.minEmployees}+ employees`
     : `${plan.minEmployees}–${plan.maxEmployees} employees`
   const reasons = [`${employees} employees fits ${plan.name} (${range})`]
-  if (needsSSO) reasons.push('SSO required — only Team Enterprise supports SSO')
+  if (needsSSO) reasons.push('SSO required - only Team Enterprise supports SSO')
 
   send(res, 200, {
     recommendedPlan: plan.name,
