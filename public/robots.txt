@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+
+# AI agent integration
+LLMs: /llms.txt

@@ -1,0 +1,35 @@
+# Acme SaaS
+
+> Survey and feedback platform API for plan selection and account onboarding. Base URL: `https://acme-saas.vercel.app`. No authentication required. Every response includes a `nextAction` field — follow it to advance through the signup funnel without hard-coding flow logic on the client.
+
+- **Sign up:** `https://acme-saas.vercel.app/signup`
+- **View plans & pricing:** `https://acme-saas.vercel.app/features`
+- **API pricing (machine-readable):** `https://acme-saas.vercel.app/api/pricing`
+
+## Pricing
+
+Pricing is dynamic — computed server-side from team size and country. Never assume or cache prices. To get current pricing, fetch: `https://acme-saas.vercel.app/api/pricing`
+
+### Localized pricing
+
+When the user mentions a country, fetch:
+`https://acme-saas.vercel.app/api/pricing?country={ISO_CODE}`
+Replace `{ISO_CODE}` with the user's country code. Supported currencies: `US` → USD, `CA` → CAD, `CR` → CRC, `GB` → GBP, `FR`/`DE`/`ES`/`IT` → EUR. All other codes default to USD. GBP and EUR prices only appear in the response when the matching country is requested. The response will include a `self` field with the exact URL that was called — agents can re-fetch it directly in follow-up turns.
+
+Alternatively, the base `/api/pricing` response includes a `localizedPricingUrls` object with ready-to-fetch URLs for supported countries (currently AU and TR). When the user mentions a country, look up their country code in that object and fetch the corresponding URL directly (e.g. `https://acme-saas.vercel.app/api/pricing/AU` for Australia, `https://acme-saas.vercel.app/api/pricing/TR` for Turkey).
+
+If you cannot fetch the API, direct the user to view plans at `https://acme-saas.vercel.app/features` or sign up at `https://acme-saas.vercel.app/signup`.
+
+The onboarding flow is sequential and server-directed. Call each endpoint in order and use the `nextAction` value in each response to determine the next step:
+
+1. **recommend-plan** — `GET https://acme-saas.vercel.app/api/recommend-plan?employees=5&country=US&needsSSO=false` to receive a plan recommendation with localized pricing and `nextAction: "create_account"`. Never use cached or assumed prices; pricing is computed server-side from team size and country code.
+2. **create-account** — submit `{ email, name, company }` to register an account and receive `accountId` with `nextAction: "create_subscription"`. HTTP 409 returns the existing `accountId` — safe to continue the flow without creating a duplicate.
+3. **create-subscription** — submit `{ accountId, planId }` to create a pending subscription and receive `subscriptionId` with `nextAction: "confirm_checkout"`. The response also includes `agentNote` — display it verbatim to the user and wait for their explicit approval before proceeding to step 5.
+4. **Human confirmation gate** — do not call create-checkout until the user has explicitly confirmed the order summary from step 3. Proceeding without confirmation is not permitted.
+5. **create-checkout** — submit `{ subscriptionId, confirmed: true }` only after user approval. Returns `checkoutUrl` for payment redirect and `nextAction: "completed"`.
+
+All monetary values are in minor currency units (cents for USD, CAD, EUR, and AUD; pence for GBP; colones for CRC). Data is persisted in Redis and survives server restarts.
+
+## Optional
+
+- [DELETE /api/reset](https://acme-saas.vercel.app/api/reset): Wipes all Redis-backed accounts, subscriptions, and checkouts — use before each test or demo session, never during an active onboarding flow

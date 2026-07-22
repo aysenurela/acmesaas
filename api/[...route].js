@@ -1,0 +1,358 @@
+import { Redis } from '@upstash/redis'
+import { randomUUID } from 'node:crypto'
+
+const redis = new Redis({
+  url: process.env.KV_REST_API_URL,
+  token: process.env.KV_REST_API_TOKEN,
+})
+
+// ── Plans ─────────────────────────────────────────────────────────────────
+
+const PLANS = {
+  starter: {
+    id: 'starter', name: 'Starter',
+    description: 'Free plan for individuals and very small teams.',
+    minEmployees: 1, maxEmployees: 3, supportsSSO: false,
+    priceUSD: 0, priceCAD: 0, priceCRC: 0, priceGBP: 0, priceEUR: 0, priceAUD: 0, priceTRY: 0,
+  },
+  advantage: {
+    id: 'advantage', name: 'Team Advantage',
+    description: 'For small teams getting started.',
+    minEmployees: 4, maxEmployees: 10, supportsSSO: false,
+    priceUSD: 5900, priceCAD: 7900, priceCRC: 30900, priceGBP: 4700, priceEUR: 5400, priceAUD: 8900, priceTRY: 189900,
+  },
+  premier: {
+    id: 'premier', name: 'Team Premier',
+    description: 'For growing teams that need more capacity.',
+    minEmployees: 11, maxEmployees: 50, supportsSSO: false,
+    priceUSD: 11900, priceCAD: 15900, priceCRC: 61900, priceGBP: 9400, priceEUR: 10900, priceAUD: 17900, priceTRY: 379900,
+  },
+  enterprise: {
+    id: 'enterprise', name: 'Team Enterprise',
+    description: 'For large teams with advanced needs including SSO.',
+    minEmployees: 51, maxEmployees: Infinity, supportsSSO: true,
+    priceUSD: 24900, priceCAD: 33900, priceCRC: 129900, priceGBP: 19900, priceEUR: 22900, priceAUD: 37900, priceTRY: 799900,
+  },
+}
+
+// Maps planId → SKU and response limits.
+// Note: 'starter' is API-only (free plan) and intentionally not shown on /features.
+const PRODUCTS = [
+  { sku: 'starter',            planId: 'starter',    responsesPerYear: 5000   },
+  { sku: 'team-advantage',  planId: 'advantage',  responsesPerYear: 50000  },
+  { sku: 'team-premier',    planId: 'premier',    responsesPerYear: 100000 },
+  { sku: 'team-enterprise', planId: 'enterprise', responsesPerYear: 200000 },
+]
+
+function currencyForCountry(country) {
+  if (!country) return 'USD'
+  const c = country.toUpperCase()
+  if (['CR', 'CRI', 'COSTA RICA'].includes(c)) return 'CRC'
+  if (['CA', 'CAN', 'CANADA'].includes(c)) return 'CAD'
+  if (['GB', 'GBR', 'UK', 'UNITED KINGDOM'].includes(c)) return 'GBP'
+  if (['FR', 'FRA', 'FRANCE', 'DE', 'DEU', 'GERMANY', 'ES', 'ESP', 'SPAIN', 'IT', 'ITA', 'ITALY'].includes(c)) return 'EUR'
+  if (['AU', 'AUS', 'AUSTRALIA'].includes(c)) return 'AUD'
+  if (['TR', 'TUR', 'TURKEY', 'TURKIYE'].includes(c)) return 'TRY'
+  return 'USD'
+}
+
+function parseBool(val) {
+  return val === true || val === 'true'
+}
+
+function selectPlan(employees, needsSSO) {
+  if (needsSSO) return PLANS.enterprise
+  return Object.values(PLANS).find(p => employees <= p.maxEmployees) ?? PLANS.enterprise
+}
+
+const PRICE_KEY = { USD: 'priceUSD', CAD: 'priceCAD', CRC: 'priceCRC', GBP: 'priceGBP', EUR: 'priceEUR', AUD: 'priceAUD', TRY: 'priceTRY' }
+
+function planPrice(plan, country) {
+  const currency = currencyForCountry(country)
+  return { price: plan[PRICE_KEY[currency]], currency }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+const BASE_URL = 'https://acme-saas.vercel.app'
+
+const HELPFUL_LINKS = {
+  plansUrl: `${BASE_URL}/features`,
+  signupUrl: `${BASE_URL}/signup`,
+}
+
+function send(res, status, body) {
+  const payload = status >= 400 ? { ...body, ...HELPFUL_LINKS } : body
+  const path = (res.req?.url ?? '').split('?')[0]
+  redis.lpush('api:responses', JSON.stringify({
+    time: new Date().toISOString(),
+    method: res.req?.method,
+    path,
+    status,
+    body: payload,
+  })).catch(() => {})
+  res.status(status).json(payload)
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────
+
+async function handleApiLog(req, res) {
+  const hits = await redis.lrange('api:hits', 0, 49)
+  const responses = (await redis.lrange('api:responses', 0, 49)).map(r =>
+    typeof r === 'string' ? JSON.parse(r) : r
+  )
+  res.status(200).json({ hits, responses })
+}
+
+function handleListPlans(req, res) {
+  const { country } = req.query ?? {}
+  const plans = Object.values(PLANS).map(plan => {
+    const { price, currency } = planPrice(plan, country)
+    return {
+      planId: plan.id,
+      name: plan.name,
+      description: plan.description,
+      maxEmployees: plan.maxEmployees === Infinity ? 'unlimited' : plan.maxEmployees,
+      supportsSSO: plan.supportsSSO,
+      price, currency,
+      billingCycle: 'monthly',
+    }
+  })
+  send(res, 200, {
+    plans,
+    ...HELPFUL_LINKS,
+  })
+}
+
+function handlePricing(req, res) {
+  const { country, employees: employeesRaw, needsSSO } = req.query ?? {}
+  const cur = currencyForCountry(country)
+  const employees = employeesRaw ? Number(employeesRaw) : null
+  const recommendedPlanId = (employees !== null && !Number.isNaN(employees))
+    ? selectPlan(employees, parseBool(needsSSO)).id
+    : null
+
+  const products = PRODUCTS.map(product => {
+    const plan = PLANS[product.planId]
+    const entry = {
+      sku: product.sku,
+      name: plan.name,
+      active: true,
+      planId: product.planId,
+      minEmployees: plan.minEmployees,
+      maxEmployees: plan.maxEmployees === Infinity ? 'unlimited' : plan.maxEmployees,
+      responsesPerYear: product.responsesPerYear,
+      prices: [
+        { country: 'US', currency: 'usd', unit_amount: plan.priceUSD, billing_scheme: 'per_unit', type: 'recurring', is_default: cur === 'USD' },
+        { country: 'CA', currency: 'cad', unit_amount: plan.priceCAD, billing_scheme: 'per_unit', type: 'recurring', is_default: cur === 'CAD' },
+        { country: 'CR', currency: 'crc', unit_amount: plan.priceCRC, billing_scheme: 'per_unit', type: 'recurring', is_default: cur === 'CRC' },
+        ...(cur === 'GBP' ? [{ country: 'GB', currency: 'gbp', unit_amount: plan.priceGBP, billing_scheme: 'per_unit', type: 'recurring', is_default: true }] : []),
+        ...(cur === 'EUR' ? [{ country: 'EU', currency: 'eur', unit_amount: plan.priceEUR, billing_scheme: 'per_unit', type: 'recurring', is_default: true }] : []),
+        ...(cur === 'AUD' ? [{ country: 'AU', currency: 'aud', unit_amount: plan.priceAUD, billing_scheme: 'per_unit', type: 'recurring', is_default: true }] : []),
+        ...(cur === 'TRY' ? [{ country: 'TR', currency: 'try', unit_amount: plan.priceTRY, billing_scheme: 'per_unit', type: 'recurring', is_default: true }] : []),
+      ],
+    }
+    if (recommendedPlanId !== null) entry.is_recommended = product.planId === recommendedPlanId
+    return entry
+  })
+  const qs = new URLSearchParams()
+  if (country) qs.set('country', country)
+  if (employeesRaw) qs.set('employees', employeesRaw)
+  if (needsSSO) qs.set('needsSSO', needsSSO)
+  const self = BASE_URL + '/api/pricing' + (qs.size ? '?' + qs : '')
+  const localizedPricingUrls = {
+    AU: BASE_URL + '/api/pricing/AU',
+    TR: BASE_URL + '/api/pricing/TR',
+  }
+  send(res, 200, { self, products, localizedPricingUrls, ...HELPFUL_LINKS })
+}
+
+function handleRecommendPlan(req, res) {
+  const source = req.query
+  const { country } = source
+  const needsSSO = parseBool(source.needsSSO)
+  const employees = Number(source.employees)
+
+  if (!employees || typeof employees !== 'number' || employees < 1) {
+    return send(res, 400, { error: '`employees` must be a positive number.' })
+  }
+
+  const plan = selectPlan(employees, needsSSO)
+  const { price, currency } = planPrice(plan, country)
+
+  const range = plan.maxEmployees === Infinity
+    ? `${plan.minEmployees}+ employees`
+    : `${plan.minEmployees}–${plan.maxEmployees} employees`
+  const reasons = [`${employees} employees fits ${plan.name} (${range})`]
+  if (needsSSO) reasons.push('SSO required — only Team Enterprise supports SSO')
+
+  send(res, 200, {
+    recommendedPlan: plan.name,
+    planId: plan.id,
+    price, currency,
+    billingCycle: 'monthly',
+    reasons,
+    ...HELPFUL_LINKS,
+    nextAction: 'create_account',
+  })
+}
+
+async function handleCreateAccount(req, res) {
+  const { email, name, company } = req.body ?? {}
+
+  if (!email || !name || !company) {
+    return send(res, 400, { error: '`email`, `name`, and `company` are required.' })
+  }
+
+  const existingId = await redis.get(`account:email:${email}`)
+  if (existingId) {
+    return send(res, 409, { error: 'An account with this email already exists.', accountId: existingId })
+  }
+
+  const account = { id: randomUUID(), email, name, company, createdAt: new Date().toISOString() }
+  await redis.set(`account:${account.id}`, account)
+  await redis.set(`account:email:${email}`, account.id)
+
+  send(res, 201, {
+    accountId: account.id,
+    email: account.email,
+    company: account.company,
+    createdAt: account.createdAt,
+    nextAction: 'create_subscription',
+  })
+}
+
+async function handleCreateSubscription(req, res) {
+  const { accountId, planId } = req.body ?? {}
+
+  if (!accountId || !planId) {
+    return send(res, 400, { error: '`accountId` and `planId` are required.' })
+  }
+
+  const account = await redis.get(`account:${accountId}`)
+  if (!account) return send(res, 404, { error: 'Account not found.' })
+
+  const plan = PLANS[planId]
+  if (!plan) {
+    return send(res, 400, { error: `Unknown planId. Valid values: ${Object.keys(PLANS).join(', ')}.` })
+  }
+
+  const existingSubId = await redis.get(`sub:account:${accountId}`)
+  if (existingSubId) {
+    const existingSub = await redis.get(`sub:${existingSubId}`)
+    if (existingSub?.status === 'pending') {
+      return send(res, 409, {
+        error: 'Account already has a pending subscription.',
+        subscriptionId: existingSubId,
+        nextAction: 'confirm_checkout',
+      })
+    }
+  }
+
+  const sub = {
+    id: randomUUID(), accountId,
+    planId: plan.id, planName: plan.name,
+    priceUSD: plan.priceUSD, priceCRC: plan.priceCRC,
+    billingCycle: 'monthly', status: 'pending',
+    createdAt: new Date().toISOString(),
+  }
+  await redis.set(`sub:${sub.id}`, sub)
+  await redis.set(`sub:account:${accountId}`, sub.id)
+
+  send(res, 201, {
+    subscriptionId: sub.id,
+    accountId: sub.accountId,
+    plan: sub.planName,
+    price: sub.priceUSD,
+    currency: 'USD',
+    billingCycle: sub.billingCycle,
+    status: sub.status,
+    nextAction: 'confirm_checkout',
+    agentNote: 'Present the order summary to the user and wait for explicit confirmation before calling /api/create-checkout.',
+  })
+}
+
+async function handleCreateCheckout(req, res) {
+  const { subscriptionId, confirmed } = req.body ?? {}
+
+  if (!subscriptionId) {
+    return send(res, 400, { error: '`subscriptionId` is required.' })
+  }
+  if (confirmed !== true) {
+    return send(res, 400, {
+      error: 'User confirmation is required. Set `confirmed: true` after the user has explicitly approved the order.',
+    })
+  }
+
+  const sub = await redis.get(`sub:${subscriptionId}`)
+  if (!sub) return send(res, 404, { error: 'Subscription not found.' })
+
+  if (sub.status === 'active') {
+    const checkout = await redis.get(`checkout:sub:${subscriptionId}`)
+    return send(res, 409, { error: 'Checkout already exists.', checkoutUrl: checkout?.url })
+  }
+
+  const checkoutId = randomUUID()
+  const checkoutUrl = `${BASE_URL}/signup?checkout=${checkoutId}`
+  const checkout = { id: checkoutId, subscriptionId, url: checkoutUrl, createdAt: new Date().toISOString() }
+
+  await redis.set(`sub:${subscriptionId}`, { ...sub, status: 'active' })
+  await redis.set(`checkout:sub:${subscriptionId}`, checkout)
+
+  send(res, 200, { checkoutUrl, subscriptionId, status: 'active', nextAction: 'completed' })
+}
+
+async function handleReset(req, res) {
+  const secret = process.env.RESET_SECRET
+  if (secret && req.headers['x-reset-token'] !== secret) {
+    return send(res, 401, { error: 'Unauthorized.' })
+  }
+
+  const keys = await redis.keys('*')
+  if (keys.length > 0) await redis.del(...keys)
+  send(res, 200, { message: 'All data cleared.' })
+}
+
+// ── Router ────────────────────────────────────────────────────────────────
+
+const ROUTES = {
+  '/api/pricing':              { GET: handlePricing },
+  '/api/plans':                { GET: handleListPlans },
+  '/api/recommend-plan':       { GET: handleRecommendPlan },
+  '/api/create-account':       { POST: handleCreateAccount },
+  '/api/create-subscription':  { POST: handleCreateSubscription },
+  '/api/create-checkout':      { POST: handleCreateCheckout },
+  '/api/reset':                { DELETE: handleReset },
+  '/api/log':                  { GET: handleApiLog },
+}
+
+export default async function handler(req, res) {
+  console.log(`[API HIT] ${req.method} ${req.url}`)
+  if (req.method === 'OPTIONS') return res.status(200).end()
+  await redis.lpush('api:hits', `${new Date().toISOString()} ${req.method} ${req.url}`)
+
+  const path = (req.url ?? '').split('?')[0]
+  const pricingMatch = path.match(/^\/api\/pricing\/([A-Za-z]{2,3})$/)
+  if (pricingMatch) {
+    req.query = { ...req.query, country: pricingMatch[1].toUpperCase() }
+    const fn = ROUTES['/api/pricing']?.[req.method]
+    if (!fn) return res.status(405).end()
+    try { return await fn(req, res) } catch (err) { return send(res, 500, { error: err.message }) }
+  }
+
+  const route = ROUTES[path]
+
+  if (!route) return send(res, 404, { error: 'Not found.' })
+
+  const fn = route[req.method]
+  if (!fn) {
+    res.setHeader('Allow', Object.keys(route).join(', '))
+    return res.status(405).end()
+  }
+
+  try {
+    await fn(req, res)
+  } catch (err) {
+    send(res, 500, { error: err.message })
+  }
+}
