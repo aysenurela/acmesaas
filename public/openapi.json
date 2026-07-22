@@ -1,0 +1,410 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Acme SaaS API",
+    "version": "1.1.0",
+    "description": "RESTful API for plan selection and account onboarding.\n\n**Two tiers of access:**\n\n- **Informational (GET only):** Works from any HTTP client. Endpoints tagged `x-agent-capability: read-only` require no authentication and no POST support. For agents that cannot construct dynamic URLs, fetch `https://acmesaas-nine.vercel.app/pricing.md` instead — it contains all pricing data statically.\n- **Transactional (POST required):** Account creation, subscription, and checkout require POST support and explicit user confirmation at key steps. Endpoints tagged `x-agent-capability: read-write`. Agents without POST support should direct users to https://acmesaas-nine.vercel.app/signup.\n\nEvery response includes a `nextAction` field — follow it to advance through the signup funnel.",
+    "contact": {
+      "name": "Acme SaaS",
+      "url": "https://acmesaas-nine.vercel.app"
+    },
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/licenses/MIT"
+    }
+  },
+  "externalDocs": {
+    "description": "Integration guide (llms.txt)",
+    "url": "https://acmesaas-nine.vercel.app/llms.txt"
+  },
+  "servers": [
+    { "url": "https://acmesaas-nine.vercel.app", "description": "Production" },
+    { "url": "http://localhost:5173", "description": "Local dev" }
+  ],
+  "tags": [
+    {
+      "name": "Informational",
+      "description": "GET-only endpoints. No POST support required. Safe to call from any HTTP client or agent. For agents that cannot construct URLs with query parameters, use `/pricing.md` instead."
+    },
+    {
+      "name": "Onboarding",
+      "description": "Transactional POST endpoints. Require full HTTP access and explicit user confirmation at key steps. Agents without POST support should direct users to https://acmesaas-nine.vercel.app/signup."
+    },
+    {
+      "name": "Utility",
+      "description": "Development and testing helpers."
+    }
+  ],
+  "components": {
+    "schemas": {
+      "PlanId": {
+        "type": "string",
+        "enum": ["starter", "advantage", "premier", "enterprise"],
+        "example": "enterprise"
+      },
+      "Plan": {
+        "type": "object",
+        "required": ["planId", "name", "description", "minEmployees", "maxEmployees", "supportsSSO", "price", "currency", "billingCycle"],
+        "properties": {
+          "planId": { "$ref": "#/components/schemas/PlanId" },
+          "name": { "type": "string", "example": "Team Advantage" },
+          "description": { "type": "string", "example": "For small teams getting started." },
+          "minEmployees": { "type": "integer", "minimum": 1, "example": 4 },
+          "maxEmployees": {
+            "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "string", "enum": ["unlimited"] }],
+            "example": 10
+          },
+          "supportsSSO": { "type": "boolean", "example": false },
+          "price": { "type": "integer", "minimum": 0, "description": "Price in minor currency units (e.g. cents for USD).", "example": 5900 },
+          "currency": { "type": "string", "minLength": 3, "maxLength": 3, "example": "USD" },
+          "billingCycle": { "type": "string", "enum": ["monthly", "annual"], "example": "monthly" }
+        }
+      },
+      "NextAction": {
+        "type": "string",
+        "enum": ["create_account", "create_subscription", "confirm_checkout", "completed"],
+        "description": "Identifier of the next step in the onboarding funnel. Follow this field instead of hard-coding flow logic.",
+        "example": "create_account"
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string", "example": "`employees` must be a positive number." },
+          "plansUrl": { "type": "string", "format": "uri", "example": "https://acmesaas-nine.vercel.app/features" },
+          "signupUrl": { "type": "string", "format": "uri", "example": "https://acmesaas-nine.vercel.app/signup" }
+        }
+      },
+      "PlanRecommendation": {
+        "type": "object",
+        "required": ["recommendedPlan", "planId", "price", "currency", "billingCycle", "reasons", "nextAction"],
+        "properties": {
+          "recommendedPlan": { "type": "string", "example": "Team Premier" },
+          "planId": { "$ref": "#/components/schemas/PlanId" },
+          "price": { "type": "integer", "minimum": 0, "example": 11900 },
+          "currency": { "type": "string", "minLength": 3, "maxLength": 3, "example": "USD" },
+          "billingCycle": { "type": "string", "enum": ["monthly", "annual"], "example": "monthly" },
+          "reasons": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "nextAction": { "$ref": "#/components/schemas/NextAction" },
+          "signupUrl": { "type": "string", "format": "uri" },
+          "plansUrl": { "type": "string", "format": "uri" }
+        }
+      },
+      "Account": {
+        "type": "object",
+        "required": ["accountId", "email", "company", "createdAt", "nextAction"],
+        "properties": {
+          "accountId": { "type": "string", "format": "uuid", "example": "3fa85f64-5717-4562-b3fc-2c963f66afa6" },
+          "email": { "type": "string", "format": "email", "example": "jane@acme.com" },
+          "company": { "type": "string", "example": "Acme Corp" },
+          "createdAt": { "type": "string", "format": "date-time", "example": "2026-07-05T14:00:00.000Z" },
+          "nextAction": { "$ref": "#/components/schemas/NextAction" }
+        }
+      },
+      "Subscription": {
+        "type": "object",
+        "required": ["subscriptionId", "accountId", "plan", "price", "currency", "billingCycle", "status", "nextAction"],
+        "properties": {
+          "subscriptionId": { "type": "string", "format": "uuid" },
+          "accountId": { "type": "string", "format": "uuid" },
+          "plan": { "type": "string", "example": "Team Premier" },
+          "price": { "type": "integer", "minimum": 0 },
+          "currency": { "type": "string", "minLength": 3, "maxLength": 3 },
+          "billingCycle": { "type": "string", "enum": ["monthly", "annual"] },
+          "status": { "type": "string", "enum": ["pending", "active"] },
+          "nextAction": { "$ref": "#/components/schemas/NextAction" },
+          "agentNote": {
+            "type": "string",
+            "description": "Display this message verbatim to the user and wait for explicit approval before proceeding to /api/create-checkout.",
+            "example": "Please confirm your order before we proceed to checkout."
+          }
+        }
+      },
+      "Checkout": {
+        "type": "object",
+        "required": ["checkoutUrl", "subscriptionId", "status", "nextAction"],
+        "properties": {
+          "checkoutUrl": { "type": "string", "format": "uri", "example": "https://acmesaas-nine.vercel.app/signup?checkout=3fa85f64-5717-4562-b3fc-2c963f66afa6" },
+          "subscriptionId": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "enum": ["active"] },
+          "nextAction": { "$ref": "#/components/schemas/NextAction" }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": { "description": "Missing or invalid fields.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotFound": { "description": "Referenced resource does not exist.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "MethodNotAllowed": { "description": "HTTP method not supported on this endpoint.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "InternalServerError": { "description": "Unexpected server error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    }
+  },
+  "paths": {
+    "/pricing.md": {
+      "get": {
+        "operationId": "getPricingMarkdown",
+        "summary": "Static pricing for all countries (no parameters needed)",
+        "description": "Plain-text Markdown file with all plans, prices, and country/currency mappings. Recommended for agents that cannot construct dynamic URLs or prefer a single fetch over repeated API calls. Parse the user's country from the conversation and display the matching row. No query parameters required.",
+        "tags": ["Informational"],
+        "x-agent-capability": "read-only",
+        "responses": {
+          "200": { "description": "Markdown pricing table.", "content": { "text/markdown": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/api/pricing": {
+      "get": {
+        "operationId": "getPricing",
+        "summary": "Live pricing for all products",
+        "description": "Returns the product catalogue with prices per country. Pass `country` to flag the relevant price as `is_default: true`. The response includes a `self` field with the exact URL called — agents can re-fetch it in follow-up turns without reconstructing the URL. Also returns `localizedPricingUrls` with ready-to-fetch URLs for AU and TR — use those directly, do not construct them.",
+        "tags": ["Informational"],
+        "x-agent-capability": "read-only",
+        "parameters": [
+          {
+            "name": "country",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "ISO 3166-1 country code. US → USD, CA → CAD, CR → CRC, GB → GBP, FR/DE/ES/IT → EUR. Defaults to USD.",
+            "example": "CR"
+          },
+          {
+            "name": "employees",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1 },
+            "description": "When provided with `needsSSO`, flags the best-fit product as `is_recommended: true`.",
+            "example": 15
+          },
+          {
+            "name": "needsSSO",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "boolean" },
+            "example": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Product catalogue.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "self": { "type": "string", "format": "uri", "description": "The exact URL that was called. Re-fetch this directly in follow-up turns.", "example": "https://acmesaas-nine.vercel.app/api/pricing?country=CR" },
+                    "products": { "type": "array", "items": { "type": "object" } },
+                    "localizedPricingUrls": {
+                      "type": "object",
+                      "description": "Ready-to-fetch URLs for countries that require path-based access (AU, TR). Fetch these directly — do not construct them manually.",
+                      "example": { "AU": "https://acmesaas-nine.vercel.app/api/pricing/AU", "TR": "https://acmesaas-nine.vercel.app/api/pricing/TR" }
+                    },
+                    "plansUrl": { "type": "string", "format": "uri" },
+                    "signupUrl": { "type": "string", "format": "uri" }
+                  }
+                }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/InternalServerError" }
+        }
+      }
+    },
+    "/api/pricing/{country}": {
+      "get": {
+        "operationId": "getPricingByCountry",
+        "summary": "Localized pricing by country (path-based)",
+        "description": "Path-based alternative to `?country=` on `/api/pricing`. Use the URL returned in `localizedPricingUrls` from the base pricing response — do not construct this path manually. AUD and TRY prices only appear in this localized response.",
+        "tags": ["Informational"],
+        "x-agent-capability": "read-only",
+        "parameters": [
+          {
+            "name": "country",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 2, "maxLength": 3 },
+            "description": "ISO country code (e.g. AU, TR).",
+            "example": "AU"
+          }
+        ],
+        "responses": {
+          "200": { "description": "Localized pricing.", "content": { "application/json": { "schema": { "type": "object" } } } }
+        }
+      }
+    },
+    "/api/plans": {
+      "get": {
+        "operationId": "listPlans",
+        "summary": "List all plans with pricing",
+        "description": "Returns all plans with a single price per plan for the given country. Simpler response shape than `/api/pricing`. Pass `country` for localized currency.",
+        "tags": ["Informational"],
+        "x-agent-capability": "read-only",
+        "parameters": [
+          {
+            "name": "country",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "minLength": 2, "maxLength": 3, "example": "CR" },
+            "description": "ISO 3166-1 country code. Defaults to USD if omitted."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "All plans with pricing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["plans", "signupUrl", "plansUrl"],
+                  "properties": {
+                    "plans": { "type": "array", "items": { "$ref": "#/components/schemas/Plan" } },
+                    "signupUrl": { "type": "string", "format": "uri" },
+                    "plansUrl": { "type": "string", "format": "uri" }
+                  }
+                }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/InternalServerError" }
+        }
+      }
+    },
+    "/api/recommend-plan": {
+      "get": {
+        "operationId": "recommendPlan",
+        "summary": "Get a plan recommendation",
+        "description": "Returns the best-fit plan for the given team size, country, and SSO requirement, with localized pricing and a `nextAction` to continue onboarding. Agents that cannot make GET requests with query parameters can apply the selection rules from `pricing.md` conversationally instead.",
+        "tags": ["Informational"],
+        "x-agent-capability": "read-only",
+        "parameters": [
+          { "name": "employees", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 1, "example": 15 } },
+          { "name": "country", "in": "query", "required": false, "schema": { "type": "string", "minLength": 2, "maxLength": 3, "example": "CR" } },
+          { "name": "needsSSO", "in": "query", "required": false, "schema": { "type": "boolean", "default": false } }
+        ],
+        "responses": {
+          "200": { "description": "Plan recommendation.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlanRecommendation" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "500": { "$ref": "#/components/responses/InternalServerError" }
+        }
+      }
+    },
+    "/api/create-account": {
+      "post": {
+        "operationId": "createAccount",
+        "summary": "Create an account",
+        "description": "Step 2 of onboarding. Requires POST support. Agents without POST support should direct users to https://acmesaas-nine.vercel.app/signup. HTTP 409 returns the existing `accountId` — safe to continue without creating a duplicate.",
+        "tags": ["Onboarding"],
+        "x-agent-capability": "read-write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email", "name", "company"],
+                "properties": {
+                  "email": { "type": "string", "format": "email", "example": "jane@acme.com" },
+                  "name": { "type": "string", "minLength": 1, "example": "Jane Smith" },
+                  "company": { "type": "string", "minLength": 1, "example": "Acme Corp" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Account created.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Account" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": {
+            "description": "Email already registered. Returns existing `accountId`.",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/Error" }, { "type": "object", "properties": { "accountId": { "type": "string", "format": "uuid" } } }] } } }
+          },
+          "500": { "$ref": "#/components/responses/InternalServerError" }
+        }
+      }
+    },
+    "/api/create-subscription": {
+      "post": {
+        "operationId": "createSubscription",
+        "summary": "Create a subscription",
+        "description": "Step 3 of onboarding. Links an account to a plan. Returns `subscriptionId` and an `agentNote` field — display it verbatim to the user and wait for explicit confirmation before calling `/api/create-checkout`. Requires POST support.",
+        "tags": ["Onboarding"],
+        "x-agent-capability": "read-write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["accountId", "planId"],
+                "properties": {
+                  "accountId": { "type": "string", "format": "uuid" },
+                  "planId": { "$ref": "#/components/schemas/PlanId" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Subscription created in pending state.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Subscription" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": {
+            "description": "Pending subscription already exists.",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/Error" }, { "type": "object", "properties": { "subscriptionId": { "type": "string", "format": "uuid" }, "nextAction": { "$ref": "#/components/schemas/NextAction" } } }] } } }
+          },
+          "500": { "$ref": "#/components/responses/InternalServerError" }
+        }
+      }
+    },
+    "/api/create-checkout": {
+      "post": {
+        "operationId": "createCheckout",
+        "summary": "Create checkout",
+        "description": "Step 5 of onboarding. Activates the subscription and returns a payment URL. `confirmed` must be `true` and must only be set after the user has explicitly approved the order summary from `/api/create-subscription`. Do not infer or assume confirmation. Requires POST support.",
+        "tags": ["Onboarding"],
+        "x-agent-capability": "read-write",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["subscriptionId", "confirmed"],
+                "properties": {
+                  "subscriptionId": { "type": "string", "format": "uuid" },
+                  "confirmed": { "type": "boolean", "enum": [true], "description": "Must be true. Set only after explicit user confirmation." }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Checkout created. Redirect user to `checkoutUrl`.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Checkout" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "409": {
+            "description": "Checkout already exists.",
+            "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/Error" }, { "type": "object", "properties": { "checkoutUrl": { "type": "string", "format": "uri" } } }] } } }
+          },
+          "500": { "$ref": "#/components/responses/InternalServerError" }
+        }
+      }
+    },
+    "/api/reset": {
+      "delete": {
+        "operationId": "resetData",
+        "summary": "Reset all data",
+        "description": "Wipes all accounts, subscriptions, and checkouts. Development and demo use only — never call during an active onboarding flow.",
+        "tags": ["Utility"],
+        "x-agent-capability": "read-write",
+        "responses": {
+          "200": { "description": "All data cleared.", "content": { "application/json": { "schema": { "type": "object", "properties": { "message": { "type": "string", "example": "All data cleared." } } } } } },
+          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
+          "500": { "$ref": "#/components/responses/InternalServerError" }
+        }
+      }
+    }
+  }
+}

@@ -74,7 +74,7 @@ function planPrice(plan, country) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-const BASE_URL = 'https://acme-saas.vercel.app'
+const BASE_URL = 'https://acmesaas-nine.vercel.app'
 
 const HELPFUL_LINKS = {
   plansUrl: `${BASE_URL}/features`,

@@ -3,3 +3,5 @@ Allow: /
 
 # AI agent integration
 LLMs: /llms.txt
+OpenAPI: /openapi.json
+Pricing: /pricing.md

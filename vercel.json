@@ -11,7 +11,7 @@
       ]
     },
     {
-      "source": "/llms.txt",
+      "source": "/(llms.txt|openapi.json|pricing.md)",
       "headers": [
         { "key": "Access-Control-Allow-Origin", "value": "*" }
       ]
